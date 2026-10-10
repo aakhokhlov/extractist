@@ -1,30 +1,30 @@
-Информации достаточно. Ниже — пайплайн целиком с учётом трёх решений: тред как единица, `reviews.jsonl` не выгружаем вовсе, консервативность важнее полноты.
+That is enough information. Below is the full pipeline, taking into account three decisions: the thread is the unit, `reviews.jsonl` is not exported at all, and conservativeness matters more than completeness.
 
-## Что меняет масштаб «сотни комментариев»
+## What the "hundreds of comments" scale changes
 
-Это важнее всех остальных вводных. После группировки в треды и отсева ботов/шума у вас останется порядка 100–300 тредов. Из этого следует:
+This matters more than any other input. After grouping into threads and filtering out bots/noise, you will be left with roughly 100–300 threads. It follows that:
 
-- **Никакой эмбеддинг-кластеризации** (UMAP/HDBSCAN) — на таком объёме она даёт артефакты. Слияние правил делает LLM за один проход, всё влезает в контекст.
-- **Ожидайте 5–12 правил на выходе, не 25.** Если выживет три правила с прочными основаниями — это нормальный результат, не провал.
-- **Воспроизводимость вместо статистики.** Индукцию правил прогоняем трижды с перемешанными батчами; правило живёт, только если возникло минимум в двух прогонах.
-- **Holdout будет тонким** (30–50 тредов). Валидация на шаге 7 — это sanity-check в абсолютных числах, а не метрика с процентами.
+- **No embedding clustering** (UMAP/HDBSCAN) — at this volume it produces artifacts. Rule merging is done by the LLM in a single pass; everything fits in the context.
+- **Expect 5–12 rules as output, not 25.** If three rules with solid grounding survive, that is a normal result, not a failure.
+- **Reproducibility instead of statistics.** Rule induction is run three times with shuffled batches; a rule survives only if it appeared in at least two runs.
+- **The holdout will be thin** (30–50 threads). Validation in step 7 is a sanity check in absolute numbers, not a percentage metric.
 
-Пороги консервативности, зашитые в код между шагами: правило требует $\geq 3$ разных тредов, $\geq 2$ разных PR, `confidence` $\geq 0.6$, воспроизведение в $\geq 2$ из 3 прогонов. Правила с одним ревьюером-источником не отбрасываются, но помечаются и идут на ручную курацию в первую очередь.
+Conservativeness thresholds hard-coded between steps: a rule requires $\geq 3$ distinct threads, $\geq 2$ distinct PRs, `confidence` $\geq 0.6$, and reproduction in $\geq 2$ of 3 runs. Rules with a single source reviewer are not discarded, but they are flagged and go to manual curation first.
 
-## Структура проекта
+## Project structure
 
 ```
 review-rules/
 ├── PIPELINE.md
 ├── taxonomy.yaml
-├── schemas/            # JSON Schema на каждый *.jsonl
+├── schemas/            # JSON Schema for each *.jsonl
 ├── prompts/            # p1_normalize.txt … p7_review.txt
 ├── scripts/
-│   ├── extract.py      # шаг 0
-│   ├── prepare.py      # шаг 0b: треды, признаки, holdout
-│   ├── run_llm.py      # батчинг, retry, валидация JSON
-│   ├── filter_rules.py # механические пороги после шага 2
-│   └── evaluate.py     # матчинг на шаге 7
+│   ├── extract.py      # step 0
+│   ├── prepare.py      # step 0b: threads, features, holdout
+│   ├── run_llm.py      # batching, retry, JSON validation
+│   ├── filter_rules.py # mechanical thresholds after step 2
+│   └── evaluate.py     # matching in step 7
 └── data/
     ├── raw/comments.jsonl
     ├── work/threads.jsonl threads_llm.jsonl claims.jsonl rules_run{1,2,3}.jsonl
@@ -33,373 +33,373 @@ review-rules/
     └── eval/threads.jsonl findings.jsonl report.json
 ```
 
-Общий системный префикс для всех LLM-шагов 1–7:
+Common system prefix for all LLM steps 1–7:
 
 ```text
-Ты — компонент автоматического пайплайна. Отвечай только валидным JSON по указанной схеме, без markdown и пояснений. Не придумывай данные, которых нет во входе. При неопределённости используй предусмотренные схемой значения (null, needs_context, insufficient_data), а не догадки. Если во входе есть поле, не описанное в задании, — игнорируй его.
+You are a component of an automated pipeline. Respond only with valid JSON matching the specified schema, without markdown or explanations. Do not invent data that is not present in the input. When uncertain, use the values provided by the schema (null, needs_context, insufficient_data) rather than guesses. If the input contains a field not described in the task, ignore it.
 ```
 
 ---
 
-## Шаг 0 — выгрузка (промпт для агента-кодера)
+## Step 0 — export (prompt for the coding agent)
 
 ```text
-Напиши extract.py на Python 3.11+ и httpx: выгрузка inline-комментариев code review из GitHub через GraphQL.
+Write extract.py in Python 3.11+ with httpx: export inline code review comments from GitHub via GraphQL.
 
-ВХОД: GITHUB_TOKEN из окружения; repos.txt со строками owner/name; --since/--until (фильтр по mergedAt); --out, --state, --max-prs, --concurrency (по умолчанию 4), --verbose.
+INPUT: GITHUB_TOKEN from the environment; repos.txt with lines of the form owner/name; --since/--until (filter by mergedAt); --out, --state, --max-prs, --concurrency (default 4), --verbose.
 
-ИСТОЧНИК — только GraphQL https://api.github.com/graphql. REST не использовать: он не отдаёт isResolved/isOutdated.
+SOURCE — GraphQL only, https://api.github.com/graphql. Do not use REST: it does not return isResolved/isOutdated.
 
-Запросы:
-1. search(query:"repo:O/N is:pr is:merged merged:SINCE..UNTIL", type:ISSUE, first:50, after:$cursor) — перечисление PR, пагинация по cursor.
-2. Для каждого PR: number, mergedAt, additions, deletions, changedFiles, author{login}, reviewDecision,
+Queries:
+1. search(query:"repo:O/N is:pr is:merged merged:SINCE..UNTIL", type:ISSUE, first:50, after:$cursor) — enumerate PRs, paginate by cursor.
+2. For each PR: number, mergedAt, additions, deletions, changedFiles, author{login}, reviewDecision,
    reviewThreads(first:100, after:$cursor){ nodes{ id isResolved isOutdated path line originalLine startLine diffSide
      comments(first:100){ nodes{ id databaseId body createdAt author{login} authorAssociation diffHunk originalCommit{oid} commit{oid} replyTo{id} } } } }
-   reviews(first:100){ nodes{ state submittedAt author{login} } }  — нужны ТОЛЬКО для вычисления blocked_merge, тело ревью не сохранять.
+   reviews(first:100){ nodes{ state submittedAt author{login} } }  — needed ONLY to compute blocked_merge; do not store the review body.
    commits(first:100){ nodes{ commit{ committedDate oid } } }
-   Все вложенные коллекции пагинируй, если hasNextPage.
+   Paginate all nested collections if hasNextPage.
 
-ВЫХОД: один файл comments.jsonl, строка = inline-комментарий:
+OUTPUT: a single file comments.jsonl, one line = one inline comment:
 {"id","repo","pr_id","pr_merged_at","pr_author","thread_id","path","line_range":{"start","end","side"},
  "diff_hunk","comment_body","author","author_association","created_at","is_reply",
  "thread_resolved","thread_outdated","comment_commit_oid","original_commit_oid",
  "pr_size":{"additions","deletions","changed_files"},
  "pr_changes_requested_count","blocked_merge","blocked_merge_reason","schema_version":"1","run_id"}
 
-blocked_merge = true, если после ревью со state=CHANGES_REQUESTED появился коммит с committedDate > submittedAt. Это эвристика, запиши в blocked_merge_reason текст условия. Если ревью CHANGES_REQUESTED нет — false; если данные о коммитах не получены — null.
-Любое неизвестное значение — null, не false и не "". Боты и шум НЕ фильтруются на этом шаге.
+blocked_merge = true if, after a review with state=CHANGES_REQUESTED, a commit appeared with committedDate > submittedAt. This is a heuristic; write the text of the condition into blocked_merge_reason. If there is no CHANGES_REQUESTED review — false; if commit data was not retrieved — null.
+Any unknown value is null, not false and not "". Bots and noise are NOT filtered at this step.
 
-НАДЁЖНОСТЬ: ретраи с экспоненциальной задержкой на 403/429/5xx, уважение Retry-After, при тексте про secondary rate limit пауза ≥60 с; чтение X-RateLimit-Remaining, пауза при остатке <100; state.json с обработанными pr_id, повторный запуск дописывает без дублей; ошибка одного PR → запись в errors.jsonl, продолжение. Токен нигде не логируется.
+RELIABILITY: retries with exponential backoff on 403/429/5xx, respect Retry-After, pause ≥60 s when the response text mentions a secondary rate limit; read X-RateLimit-Remaining, pause when remaining <100; state.json with processed pr_id values, a re-run appends without duplicates; an error on one PR → record in errors.jsonl and continue. The token is never logged anywhere.
 
-СТРУКТУРА: build_pr_list_query(), build_pr_query() отдельными функциями, возвращающими строку GraphQL; dry_run() при --max-prs 3 печатает две записи без записи в файл. Тесты не нужны. README: команды запуска, нужные скоупы PAT (classic: repo; fine-grained: Pull requests Read + Contents Read + Metadata Read с явным перечислением репозиториев), оценка числа запросов.
+STRUCTURE: build_pr_list_query() and build_pr_query() as separate functions returning a GraphQL string; dry_run() with --max-prs 3 prints two records without writing to the file. No tests needed. README: run commands, required PAT scopes (classic: repo; fine-grained: Pull requests Read + Contents Read + Metadata Read with an explicit list of repositories), estimate of the number of requests.
 ```
 
 <details>
-<summary>Проверка пробного прогона (--max-prs 5)</summary>
+<summary>Checking the trial run (--max-prs 5)</summary>
 
-1. `diff_hunk` непустой и содержит код, не только строку `@@`.
-2. `thread_resolved` встречается и как `true`, и как `false`; если везде `null` — запрос тредов собран неверно.
-3. `is_reply=true` ровно у комментариев с `replyTo`.
-4. `pr_merged_at` заполнен у всех записей.
-5. В файле есть записи от `*[bot]` — фильтр не протёк на шаг 0.
+1. `diff_hunk` is non-empty and contains code, not just the `@@` line.
+2. `thread_resolved` appears as both `true` and `false`; if it is `null` everywhere, the threads query is built incorrectly.
+3. `is_reply=true` exactly for comments that have `replyTo`.
+4. `pr_merged_at` is filled in for all records.
+5. The file contains records from `*[bot]` — the filter has not leaked into step 0.
 
 </details>
 
-## Шаг 0b — подготовка (промпт для агента-кодера)
+## Step 0b — preparation (prompt for the coding agent)
 
 ```text
-Напиши prepare.py: из data/raw/comments.jsonl собрать треды, признаки и holdout. Сеть не используется.
+Write prepare.py: from data/raw/comments.jsonl build threads, features, and the holdout. No network access is used.
 
-1. build_threads(): группировка по thread_id, комментарии по created_at.
-   Поля треда: thread_id, repo, pr_id, pr_merged_at, path, line_range, diff_hunk (из первого комментария),
+1. build_threads(): group by thread_id, comments ordered by created_at.
+   Thread fields: thread_id, repo, pr_id, pr_merged_at, path, line_range, diff_hunk (from the first comment),
    comments:[{id, author_role, is_pr_author, body, created_at}],
-   where author_role: "bot" если login оканчивается на "[bot]" или входит в bots.txt; "member" если authorAssociation ∈ {MEMBER, OWNER, COLLABORATOR}; иначе "external".
+   where author_role: "bot" if the login ends with "[bot]" or is listed in bots.txt; "member" if authorAssociation ∈ {MEMBER, OWNER, COLLABORATOR}; otherwise "external".
    is_pr_author = author == pr_author.
-   Удали треды, где ВСЕ комментарии от ботов ИЛИ первый комментарий от бота. Остальные боты в середине треда остаются с author_role="bot".
-   Удали треды, у которых первый комментарий короче 4 символов после trim.
+   Remove threads where ALL comments are from bots OR the first comment is from a bot. Other bots in the middle of a thread remain with author_role="bot".
+   Remove threads whose first comment is shorter than 4 characters after trim.
 
-2. derive_features() на уровне треда, все null-safe:
-   n_comments, n_participants (без ботов), has_author_reply, first_reviewer_hash (sha1 логина, 8 символов — для подсчёта разнообразия ревьюеров без раскрытия имён),
-   resolved, outdated, code_changed_after = outdated OR any(comment_commit_oid != original_commit_oid) (null если нечего сравнивать),
+2. derive_features() at the thread level, all null-safe:
+   n_comments, n_participants (excluding bots), has_author_reply, first_reviewer_hash (sha1 of the login, 8 characters — for counting reviewer diversity without revealing names),
+   resolved, outdated, code_changed_after = outdated OR any(comment_commit_oid != original_commit_oid) (null if there is nothing to compare),
    resolved_after_fix = resolved AND code_changed_after, resolved_without_fix = resolved AND code_changed_after == false,
-   thread_turnaround_hours, days_before_merge, blocked_merge (с PR), pr_changes_requested_count, pr_size.
+   thread_turnaround_hours, days_before_merge, blocked_merge (from the PR), pr_changes_requested_count, pr_size.
 
-3. holdout_split(): отсортируй PR по pr_merged_at, последние 15% PR (не тредов!) → data/eval/threads.jsonl, остальные → data/work/threads.jsonl. Запиши границу даты в split.json.
+3. holdout_split(): sort PRs by pr_merged_at, the last 15% of PRs (not threads!) → data/eval/threads.jsonl, the rest → data/work/threads.jsonl. Write the date boundary to split.json.
 
-4. make_llm_view(): data/work/threads_llm.jsonl — копия work/threads.jsonl, из которой УДАЛЕНЫ: resolved, outdated, code_changed_after, resolved_after_fix, resolved_without_fix, blocked_merge, pr_changes_requested_count, n_comments, thread_turnaround_hours, days_before_merge, first_reviewer_hash, pr_size, pr_merged_at. Остаются: thread_id, repo, pr_id, path, line_range, diff_hunk, comments (без created_at). Логины авторов заменить на "reviewer_1", "pr_author", "reviewer_2" по порядку появления.
+4. make_llm_view(): data/work/threads_llm.jsonl — a copy of work/threads.jsonl from which the following are REMOVED: resolved, outdated, code_changed_after, resolved_after_fix, resolved_without_fix, blocked_merge, pr_changes_requested_count, n_comments, thread_turnaround_hours, days_before_merge, first_reviewer_hash, pr_size, pr_merged_at. What remains: thread_id, repo, pr_id, path, line_range, diff_hunk, comments (without created_at). Replace author logins with "reviewer_1", "pr_author", "reviewer_2" in order of appearance.
 
-5. Напечатай сводку: тредов всего / после фильтра / в work / в eval; доля null по каждому вычисляемому полю; распределение n_comments; число уникальных first_reviewer_hash. Если уникальных ревьюеров ≤2 — выведи предупреждение «разнообразие ревьюеров низкое, правила будут отражать стиль 1–2 человек».
+5. Print a summary: threads total / after filtering / in work / in eval; null share for each computed field; distribution of n_comments; number of unique first_reviewer_hash values. If there are ≤2 unique reviewers, print the warning "reviewer diversity is low; the rules will reflect the style of 1–2 people".
 ```
 
 ---
 
-## Шаг 1 — нормализация тредов → claims
+## Step 1 — normalizing threads → claims
 
-Батч 20–30 тредов. Вход — `threads_llm.jsonl`.
+Batch of 20–30 threads. Input — `threads_llm.jsonl`.
 
 ```text
-Тебе дан батч тредов code review. Каждый тред: thread_id, path, line_range, diff_hunk, comments (упорядочены, первый — исходное замечание, остальные — обсуждение; роли: reviewer_N, pr_author, bot).
+You are given a batch of code review threads. Each thread: thread_id, path, line_range, diff_hunk, comments (ordered; the first is the original remark, the rest are discussion; roles: reviewer_N, pr_author, bot).
 
-ЗАДАЧА: для каждого треда выделить утверждения о коде (claims) и классифицировать их.
+TASK: for each thread, extract statements about the code (claims) and classify them.
 
-ПРАВИЛА:
-1. Опирайся только на diff_hunk и текст комментариев. Если невозможно понять, о каком коде речь, — needs_context=true, normalized=null.
-2. Обычно в треде один claim. Несколько — только если ревьюер явно перечисляет разные проблемы. Реплики pr_author — контекст для понимания, не источник claims.
-3. Реплики bot игнорируй полностью.
-4. Если в обсуждении ревьюер сам отозвал замечание («а, понял, всё верно») — пометь withdrawn=true, но claim всё равно выдели.
-5. Для каждого треда ровно одна запись в выводе, порядок входа сохрани. Если claims нет — пустой список и reason.
+RULES:
+1. Rely only on diff_hunk and the comment text. If it is impossible to understand which code is being discussed — needs_context=true, normalized=null.
+2. Usually a thread has one claim. Several — only if the reviewer explicitly lists different problems. pr_author replies are context for understanding, not a source of claims.
+3. Ignore bot replies completely.
+4. If during the discussion the reviewer withdrew the remark themselves ("ah, got it, that's correct") — mark withdrawn=true, but still extract the claim.
+5. Exactly one output record per thread; preserve the input order. If there are no claims — an empty list and a reason.
 
-КАТЕГОРИИ claim:
-- noise: благодарности, "+1", LGTM, эмодзи, реакция без содержания
-- style_only: форматирование, именование, импорты, длина строк — всё, что ловит линтер
-- question: уточняющий вопрос без утверждения о дефекте
-- defect: ошибка, краевой случай, уязвимость, гонка, утечка, нарушенный контракт, неверная логика
-- design: структура, API, абстракция, тестируемость, дублирование
-- docs: документация, комментарии в коде, сообщения об ошибках для пользователя
-- process: не о коде (разбей PR, нет тестов в CI, нужен другой ревьюер)
+claim CATEGORIES:
+- noise: thanks, "+1", LGTM, emoji, reactions without content
+- style_only: formatting, naming, imports, line length — anything a linter catches
+- question: a clarifying question without a claim of a defect
+- defect: bug, edge case, vulnerability, race condition, leak, broken contract, incorrect logic
+- design: structure, API, abstraction, testability, duplication
+- docs: documentation, code comments, user-facing error messages
+- process: not about the code (split the PR, no tests in CI, another reviewer is needed)
 
-Для defect/design/docs заполни:
-- normalized: одна нейтральная фраза — проверяемое требование к коду, сформулированное как инвариант («при отсутствии X поле Y должно…»). Без обращений и императива.
-- evidence: дословная цитата из комментария ревьюера (≤200 символов)
-- code_anchor: идентификатор или строка из diff_hunk, к которой относится claim, либо null
-- severity_hint: low | medium | high — только по тексту и хунку
-- language: язык кода в diff_hunk, если определим, иначе null
+For defect/design/docs fill in:
+- normalized: one neutral sentence — a verifiable requirement on the code, phrased as an invariant ("when X is absent, field Y must…"). No addressing the reader and no imperative mood.
+- evidence: a verbatim quote from the reviewer's comment (≤200 characters)
+- code_anchor: an identifier or line from diff_hunk that the claim refers to, or null
+- severity_hint: low | medium | high — based only on the text and the hunk
+- language: the language of the code in diff_hunk, if determinable, otherwise null
 
-ВЫВОД:
+OUTPUT:
 {"threads":[{"thread_id":"...","claims":[{"claim_id":"<thread_id>#1","category":"...","normalized":"...","evidence":"...","code_anchor":"...","severity_hint":"...","language":"...","needs_context":false,"withdrawn":false}],"reason":null}]}
 
-Батч:
+Batch:
 {{BATCH_JSON}}
 ```
 
-Код после шага 1: в `claims.jsonl` идут только `category ∈ {defect, design, docs}`, `needs_context=false`, `withdrawn=false`. К каждому claim код дописывает `pr_id` и `first_reviewer_hash` из `threads.jsonl` — модель на шаге 2 их **не** видит.
+Code after step 1: only `category ∈ {defect, design, docs}`, `needs_context=false`, `withdrawn=false` go into `claims.jsonl`. For each claim, the code appends `pr_id` and `first_reviewer_hash` from `threads.jsonl` — the model in step 2 does **not** see them.
 
-## Шаг 2 — индукция правил (3 прогона)
+## Step 2 — rule induction (3 runs)
 
-Батч 40–60 claims. Три прогона с разным `shuffle_seed`; каждый прогон пишет свой `rules_run{k}.jsonl` с `run_id`. При сотнях тредов один прогон — это 2–5 батчей.
+Batch of 40–60 claims. Three runs with different `shuffle_seed`; each run writes its own `rules_run{k}.jsonl` with a `run_id`. With hundreds of threads, one run is 2–5 batches.
 
 ```text
-Тебе дан батч claims — нормализованных замечаний code review с цитатами. Поля: claim_id, thread_id, normalized, evidence, code_anchor, category, language.
+You are given a batch of claims — normalized code review remarks with quotes. Fields: claim_id, thread_id, normalized, evidence, code_anchor, category, language.
 
-ЗАДАЧА: вывести атомарные правила код-ревью, подтверждённые несколькими независимыми замечаниями.
+TASK: derive atomic code review rules confirmed by several independent remarks.
 
-ЖЁСТКИЕ ПРАВИЛА:
-1. Одно свидетельство = один thread_id. Несколько claims из одного треда — одно свидетельство. Правило требует минимум 3 РАЗНЫХ thread_id. Иначе — в singletons.
-2. Одно правило = одна проверка. Запрещено объединять разные требования через «и»/«или».
-3. Правило должно быть falsifiable: должен существовать код, который его нарушает. «Код должен быть читаемым» — запрещено.
-4. Не обобщай за пределы свидетельств. Если все замечания про отсутствие проверки на None после запроса к ORM — правило про это, а не «валидируй все входы».
-5. Если формулировка сводится к предпочтению команды («мы так не делаем», «у нас принято») — scope="local_taste".
-6. Если свидетельства относятся к разным языкам/стекам и правило верно для всех — scope="universal". Если верно только для одного стека — укажи его в applies_to.
-7. Лучше не выдать правило, чем выдать сомнительное. Если сомневаешься, подтверждают ли свидетельства одно и то же, — не объединяй.
+HARD RULES:
+1. One piece of evidence = one thread_id. Several claims from the same thread count as one piece of evidence. A rule requires at least 3 DISTINCT thread_ids. Otherwise — put it in singletons.
+2. One rule = one check. Combining different requirements with "and"/"or" is forbidden.
+3. A rule must be falsifiable: there must exist code that violates it. "Code must be readable" is forbidden.
+4. Do not generalize beyond the evidence. If all the remarks are about a missing None check after an ORM query, the rule is about that, not "validate all inputs".
+5. If the wording boils down to a team preference ("we don't do it that way", "that's our convention") — scope="local_taste".
+6. If the evidence comes from different languages/stacks and the rule holds for all of them — scope="universal". If it holds only for one stack — specify it in applies_to.
+7. It is better not to output a rule than to output a doubtful one. If you are unsure whether the evidence supports the same thing — do not merge.
 
-ДЛЯ КАЖДОГО ПРАВИЛА:
-- id: kebab-case, по смыслу
-- statement: одно предложение, проверяемое на диффе
-- axis: ровно одно из {{TAXONOMY_AXES}}
+FOR EACH RULE:
+- id: kebab-case, meaningful
+- statement: one sentence, verifiable on a diff
+- axis: exactly one of {{TAXONOMY_AXES}}
 - scope: universal | local_taste
-- applies_to: язык/фреймворк или null
-- evidence_thread_ids: список thread_id (≥3)
-- best_evidence_claim_id: один claim, лучше всего иллюстрирующий правило
-- counterexample: короткий фрагмент кода, который правило отвергает, выведенный из свидетельств
-- confidence: 0..1 — уверенность, что правило обобщается за пределы батча. Снижай, если свидетельства похожи на одну и ту же проблему в одном месте.
+- applies_to: language/framework or null
+- evidence_thread_ids: list of thread_ids (≥3)
+- best_evidence_claim_id: the one claim that best illustrates the rule
+- counterexample: a short code fragment that the rule rejects, derived from the evidence
+- confidence: 0..1 — confidence that the rule generalizes beyond the batch. Lower it if the evidence looks like the same problem in the same place.
 
-ВЫВОД:
+OUTPUT:
 {"rules":[{"id":"...","statement":"...","axis":"...","scope":"...","applies_to":null,"evidence_thread_ids":["..."],"best_evidence_claim_id":"...","counterexample":"...","confidence":0.0}],
- "singletons":[{"thread_ids":["..."],"note":"кратко, о чём"}]}
+ "singletons":[{"thread_ids":["..."],"note":"briefly, what it is about"}]}
 
 Claims:
 {{BATCH_JSON}}
 ```
 
 <details>
-<summary>Механический фильтр между шагами 2 и 3 (filter_rules.py)</summary>
+<summary>Mechanical filter between steps 2 and 3 (filter_rules.py)</summary>
 
-Код считает по `evidence_thread_ids` через `threads.jsonl`: `n_threads`, `n_prs`, `n_reviewers`, `n_repos`. Оставляет правило, если:
+The code computes from `evidence_thread_ids` via `threads.jsonl`: `n_threads`, `n_prs`, `n_reviewers`, `n_repos`. It keeps a rule if:
 
-- `n_threads` $\geq 3$ и `n_prs` $\geq 2$;
+- `n_threads` $\geq 3$ and `n_prs` $\geq 2$;
 - `confidence` $\geq 0.6$;
-- все `evidence_thread_ids` реально существуют в `claims.jsonl` (модели свойственно дописывать id).
+- all `evidence_thread_ids` actually exist in `claims.jsonl` (models tend to make up ids).
 
-Правила со `scope=local_taste` не отбрасываются, а уходят в `rules_local.jsonl` — они понадобятся на шаге 6 в отдельной секции. Правила с `n_reviewers = 1` получают флаг `single_reviewer=true`.
+Rules with `scope=local_taste` are not discarded; they go to `rules_local.jsonl` — they will be needed in step 6 in a separate section. Rules with `n_reviewers = 1` get the flag `single_reviewer=true`.
 
-Выход: объединённый `rules_filtered.jsonl` из всех трёх прогонов, у каждого правила сохранён `run_id`.
+Output: a combined `rules_filtered.jsonl` from all three runs, with each rule's `run_id` preserved.
 
 </details>
 
-## Шаг 3 — слияние прогонов и дедупликация
+## Step 3 — merging runs and deduplication
 
-Один вызов на всё (при сотнях тредов это 20–60 правил). На вход — `id, run_id, statement, axis, scope, applies_to, evidence_thread_ids, counterexample`.
+One call for everything (with hundreds of threads this is 20–60 rules). Input — `id, run_id, statement, axis, scope, applies_to, evidence_thread_ids, counterexample`.
 
 ```text
-Тебе даны правила код-ревью, выведенные тремя независимыми прогонами (run_id) из одних и тех же данных. Одно и то же требование может быть сформулировано по-разному в разных прогонах.
+You are given code review rules derived by three independent runs (run_id) from the same data. The same requirement may be phrased differently in different runs.
 
-ЗАДАЧА: сгруппировать правила в канонические кластеры.
+TASK: group the rules into canonical clusters.
 
-ПРАВИЛА:
-1. Объединяй правила, только если ОДНО И ТО ЖЕ изменение кода нарушает оба. Общая тема («обработка ошибок») — не основание. Таймауты и ретраи — разные правила.
-2. Не объединяй правила про разные библиотеки или стеки, если applies_to различается.
-3. Пересечение evidence_thread_ids — сильный сигнал в пользу слияния, пустое пересечение — сигнал против, но не запрет.
-4. Правило без пары — кластер из одного элемента. Не приписывай его никуда силой.
-5. Канонический statement должен покрывать всех членов кластера и не быть шире их. Если это невозможно — не сливай.
-6. Если у кластера члены противоречат друг другу — пометь conflict=true и опиши противоречие.
+RULES:
+1. Merge rules only if THE SAME code change violates both. A shared topic ("error handling") is not grounds for merging. Timeouts and retries are different rules.
+2. Do not merge rules about different libraries or stacks if applies_to differs.
+3. Overlap of evidence_thread_ids is a strong signal in favor of merging; an empty overlap is a signal against, but not a prohibition.
+4. A rule without a pair is a single-element cluster. Do not force it into another cluster.
+5. The canonical statement must cover all members of the cluster and must not be broader than them. If that is impossible — do not merge.
+6. If members of a cluster contradict each other — mark conflict=true and describe the contradiction.
 
-ВЫВОД:
+OUTPUT:
 {"clusters":[{"cluster_id":"...","statement":"...","axis":"...","scope":"...","applies_to":null,"member_rule_ids":["..."],"counterexample":"...","conflict":false,"conflict_note":null,"merge_doubt":null}]}
 
-merge_doubt — одна строка, если слияние спорное; иначе null.
+merge_doubt — one line if the merge is questionable; otherwise null.
 
-Правила:
+Rules:
 {{RULES_JSON}}
 ```
 
-Код после шага 3 дописывает каждому кластеру: `runs_covered` (сколько из 3 прогонов дали члена), объединённые `evidence_thread_ids`, `n_threads`, `n_prs`, `n_reviewers`. **Кластеры с `runs_covered` $< 2$ отбрасываются.** Остаётся `canonical.jsonl`.
+After step 3, the code appends to each cluster: `runs_covered` (how many of the 3 runs produced a member), the combined `evidence_thread_ids`, `n_threads`, `n_prs`, `n_reviewers`. **Clusters with `runs_covered` $< 2$ are discarded.** What remains is `canonical.jsonl`.
 
 <details>
-<summary>Ручная курация после шага 3 (обязательна)</summary>
+<summary>Manual curation after step 3 (mandatory)</summary>
 
-На сотнях тредов это 15–30 минут. По каждому кластеру:
+With hundreds of threads this takes 15–30 minutes. For each cluster:
 
-1. Открыть 2–3 треда из `evidence_thread_ids` по ссылке `https://github.com/{repo}/pull/{pr_id}#discussion_r{databaseId}` — правило действительно выводимо из этих комментариев?
-2. Правило переводимо в линтер/тест/CI-проверку? → пометить `automate_with` и исключить из рубрикатора.
-3. `single_reviewer=true` → это норма команды или вкус одного человека? Во втором случае — `scope=local_taste`.
-4. `conflict=true` или `merge_doubt` заполнен → разлепить или удалить.
-5. Правило описывает стек, которого уже нет в репозитории → удалить.
+1. Open 2–3 threads from `evidence_thread_ids` via the link `https://github.com/{repo}/pull/{pr_id}#discussion_r{databaseId}` — can the rule really be derived from these comments?
+2. Can the rule be turned into a linter/test/CI check? → mark `automate_with` and exclude it from the rubric.
+3. `single_reviewer=true` → is this a team norm or one person's taste? In the latter case — `scope=local_taste`.
+4. `conflict=true` or `merge_doubt` is filled in → split or delete.
+5. The rule describes a stack that is no longer in the repository → delete.
 
-Результат — `canonical_curated.jsonl` с полем `curation_note`. Правило, по которому вы сомневаетесь дольше минуты, удаляется — это и есть «консервативность» в действии.
+The result is `canonical_curated.jsonl` with a `curation_note` field. A rule you hesitate over for more than a minute is deleted — this is "conservativeness" in action.
 
 </details>
 
-## Шаг 4 — покрытие по осям
+## Step 4 — coverage by axis
 
-Код считает по `canonical_curated.jsonl` число кластеров и тредов на каждую ось из `taxonomy.yaml`, а также `repetitive = n_prs / n_threads < 0.4 OR n_reviewers == 1`. Модели остаётся интерпретация.
+Using `canonical_curated.jsonl`, the code counts the number of clusters and threads for each axis from `taxonomy.yaml`, as well as `repetitive = n_prs / n_threads < 0.4 OR n_reviewers == 1`. Interpretation is left to the model.
 
 ```text
-Тебе даны канонические правила код-ревью с заранее вычисленной статистикой и список осей таксономии с числом правил по каждой.
+You are given canonical code review rules with precomputed statistics and a list of taxonomy axes with the number of rules for each.
 
-ЗАДАЧА:
-1. Для каждого правила проверь поле axis. Если ось явно неверна — заполни axis_suggested, исходную не меняй.
-2. Для осей с n_clusters = 0 напиши blind_spot_note (одна строка): что можно и чего нельзя заключить из отсутствия данных. Не утверждай, что команда что-то «забыла» или «не умеет».
-3. Для правил с repetitive=true напиши repetitive_note: похоже ли на одну нерешённую проблему в одном месте или на системную ошибку, судя по statement и counterexample.
+TASK:
+1. For each rule, check the axis field. If the axis is clearly wrong — fill in axis_suggested; do not change the original.
+2. For axes with n_clusters = 0, write a blind_spot_note (one line): what can and cannot be concluded from the absence of data. Do not claim that the team "forgot" or "doesn't know how to do" something.
+3. For rules with repetitive=true, write a repetitive_note: judging by the statement and counterexample, does it look like one unresolved problem in one place or a systemic error?
 
-Статистику не пересчитывай и не оспаривай.
+Do not recompute or dispute the statistics.
 
-ВЫВОД:
+OUTPUT:
 {"axes":[{"axis":"...","blind_spot_note":null}],"clusters":[{"cluster_id":"...","axis_suggested":null,"repetitive_note":null}]}
 
-Данные:
+Data:
 {{COVERAGE_JSON}}
 ```
 
-Выход этого шага — для человека (`coverage.json`), в рубрикатор он не идёт. Его польза при малых данных — честно показать, что правила покрывают 3–4 оси из 12, и это ограничение, а не свойство кода команды.
+The output of this step is for humans (`coverage.json`); it does not go into the rubric. Its value with small data is to honestly show that the rules cover 3–4 axes out of 12, and that this is a limitation, not a property of the team's code.
 
-## Шаг 5 — приоритизация
+## Step 5 — prioritization
 
-Код агрегирует по `evidence_thread_ids` из `threads.jsonl`: `resolved_after_fix_rate`, `resolved_without_fix_rate`, `code_changed_rate`, `author_reply_rate`, `mean_n_participants`, `blocked_merge_rate`, `null_rate`. Модель даёт $s$:
+The code aggregates from `evidence_thread_ids` in `threads.jsonl`: `resolved_after_fix_rate`, `resolved_without_fix_rate`, `code_changed_rate`, `author_reply_rate`, `mean_n_participants`, `blocked_merge_rate`, `null_rate`. The model provides $s$:
 
 ```text
-Тебе даны правила код-ревью со статистикой исходов по их свидетельствам. Поля stats (доли в 0..1, null — данных нет): n_threads, n_prs, n_reviewers, resolved_after_fix_rate, resolved_without_fix_rate, code_changed_rate, author_reply_rate, mean_n_participants, blocked_merge_rate, null_rate.
+You are given code review rules with outcome statistics for their evidence. stats fields (shares in 0..1, null — no data): n_threads, n_prs, n_reviewers, resolved_after_fix_rate, resolved_without_fix_rate, code_changed_rate, author_reply_rate, mean_n_participants, blocked_merge_rate, null_rate.
 
-ЗАДАЧА: оценить s ∈ [0,1] — стоимость пропуска проблемы, которую ловит правило.
+TASK: estimate s ∈ [0,1] — the cost of missing the problem the rule catches.
 
-ШКАЛА:
-- 0.0–0.2: автор вправе проигнорировать без вреда
-- 0.3–0.5: качество без функционального риска
-- 0.6–0.8: предотвращённая ошибка, не дошедшая бы до прода
-- 0.9–1.0: инцидент, уязвимость, потеря данных
+SCALE:
+- 0.0–0.2: the author may ignore it without harm
+- 0.3–0.5: quality without functional risk
+- 0.6–0.8: a prevented bug that would not have reached production
+- 0.9–1.0: incident, vulnerability, data loss
 
-ИНТЕРПРЕТАЦИЯ СТАТИСТИКИ (следуй ей, а не общим соображениям о важности темы):
-- resolved_after_fix_rate — главный сигнал принятия: автор согласился и переписал код.
-- resolved_without_fix_rate высокий — замечания закрывались без правки: отклонены или несущественны. Понижает s.
-- author_reply_rate высокий и mean_n_participants > 2 — спорное замечание, не обязательно важное.
-- blocked_merge_rate — эвристика; вес не выше половины от resolved_after_fix_rate.
+INTERPRETING THE STATISTICS (follow this, not general considerations about the importance of the topic):
+- resolved_after_fix_rate — the main acceptance signal: the author agreed and rewrote the code.
+- high resolved_without_fix_rate — remarks were closed without a fix: rejected or insignificant. Lowers s.
+- high author_reply_rate and mean_n_participants > 2 — a contested remark, not necessarily an important one.
+- blocked_merge_rate — a heuristic; weight no more than half of resolved_after_fix_rate.
 - null_rate > 0.5 → insufficient_data=true, s=null.
-- Severity по формулировке statement учитывай, но статистика исходов важнее.
+- Take the severity implied by the statement wording into account, but outcome statistics matter more.
 
-ВЫВОД:
-{"scores":[{"cluster_id":"...","s":0.0,"insufficient_data":false,"reasoning":"одна строка"}]}
+OUTPUT:
+{"scores":[{"cluster_id":"...","s":0.0,"insufficient_data":false,"reasoning":"one line"}]}
 
-Данные:
+Data:
 {{CLUSTERS_WITH_STATS_JSON}}
 ```
 
-Код считает приоритет. Логарифмы по тредам нужны, чтобы один кластер с 40 однотипными замечаниями не задавил остальные; число PR входит линейно как мера разнообразия:
+The code computes the priority. Logarithms over threads are needed so that one cluster with 40 identical remarks does not overwhelm the rest; the number of PRs enters linearly as a measure of diversity:
 
-$$priority = \log(1 + n_{threads}) \cdot n_{prs} \cdot a \cdot s, \qquad a = \begin{cases} resolved\_after\_fix\_rate & \text{если не null} \\ 0.5 & \text{иначе} \end{cases}$$
+$$priority = \log(1 + n_{threads}) \cdot n_{prs} \cdot a \cdot s, \qquad a = \begin{cases} resolved\_after\_fix\_rate & \text{if not null} \\ 0.5 & \text{otherwise} \end{cases}$$
 
-`insufficient_data=true` → `priority = null`, правило ранжируется в конец, но не удаляется.
+`insufficient_data=true` → `priority = null`; the rule is ranked last but not deleted.
 
-## Шаг 6 — рубрикатор
+## Step 6 — rubric
 
 ```text
-Собери рубрикатор для LLM-ревьюера из канонических правил с приоритетами. Вход: cluster_id, statement, axis, scope, applies_to, priority, counterexample, best_evidence (цитата + diff_hunk), automate_with.
+Build a rubric for an LLM reviewer from the canonical rules with priorities. Input: cluster_id, statement, axis, scope, applies_to, priority, counterexample, best_evidence (quote + diff_hunk), automate_with.
 
-ОГРАНИЧЕНИЯ:
-1. Не более 15 правил. Правила с automate_with не включай — вынеси в секцию «Автоматизировать».
-2. Для каждого правила: формулировка, ось, applies_to (если есть), пример нарушения (на основе counterexample/best_evidence, не выдумывай новый стек), пример НЕ-нарушения — похожий код, который правило НЕ должно ловить. Если убедительный пример не-нарушения построить не удаётся — правило слишком расплывчато, помести его в «Отложено» с этой причиной.
-3. Секция «Когда молчать»: сгенерированный код, lock-файлы, миграции, чистое переименование, изменения только в тестовых фикстурах, а также всё, что явно следует из применимости правил (например, правило про ORM не применяется к файлам без ORM).
-4. Правила scope=local_taste — отдельная секция «Соглашения этого репозитория» с пометкой, что они неприменимы к внешнему коду.
-5. Не добавляй правил, которых нет во входе. Не дописывай «общеизвестные» проверки.
+CONSTRAINTS:
+1. No more than 15 rules. Do not include rules with automate_with — move them to the "Automate" section.
+2. For each rule: wording, axis, applies_to (if any), a violation example (based on counterexample/best_evidence; do not invent a new stack), a NON-violation example — similar code that the rule must NOT flag. If a convincing non-violation example cannot be constructed, the rule is too vague; put it in "Deferred" with that reason.
+3. "When to stay silent" section: generated code, lock files, migrations, pure renames, changes only to test fixtures, and anything that clearly follows from the rules' applicability (e.g., an ORM rule does not apply to files without ORM).
+4. Rules with scope=local_taste — a separate section "Conventions of this repository", with a note that they do not apply to external code.
+5. Do not add rules that are not in the input. Do not add "well-known" checks.
 
-ФОРМАТ — Markdown:
-## Роль
-Ты — ревьюер pull request. Оставляешь замечания только по правилам ниже, ссылаясь на номер правила. Если сомневаешься — молчишь.
-## Правила
-### R1. <название>
-- Проверка: ...
-- Применимо к: ...
-- Нарушение: ```<язык> ...```
-- Не нарушение: ```<язык> ...```
-## Когда молчать
-## Соглашения этого репозитория
-## Автоматизировать (не для ревьюера)
-## Отложено
+FORMAT — Markdown:
+## Role
+You are a pull request reviewer. You leave remarks only according to the rules below, referencing the rule number. If in doubt — stay silent.
+## Rules
+### R1. <title>
+- Check: ...
+- Applies to: ...
+- Violation: ```<language> ...```
+- Not a violation: ```<language> ...```
+## When to stay silent
+## Conventions of this repository
+## Automate (not for the reviewer)
+## Deferred
 
-Данные:
+Data:
 {{PRIORITY_JSON}}
 ```
 
-После шага 6 — вторая ручная курация, короткая: прочитать рубрикатор как инструкцию для нового сотрудника. Пункт, который непонятен без контекста пайплайна, переписывается или удаляется.
+After step 6 — a second, short manual curation: read the rubric as instructions for a new employee. Any item that is unclear without the pipeline's context is rewritten or deleted.
 
-## Шаг 7 — валидация на holdout
+## Step 7 — validation on the holdout
 
-Промпт ревьюера:
+Reviewer prompt:
 
 ```text
-Ты — LLM-ревьюер. Дан дифф (один файл или его часть) и рубрикатор. Ты не знаешь и не пытаешься угадать, что написали люди.
+You are an LLM reviewer. You are given a diff (one file or part of one) and a rubric. You do not know and do not try to guess what humans wrote.
 
-ЗАДАЧА: выдать замечания строго по рубрикатору.
+TASK: produce remarks strictly according to the rubric.
 
-ПРАВИЛА:
-1. Каждое замечание ссылается на номер правила и на конкретные строки диффа (номера из RIGHT-стороны).
-2. Приоритет — минимум ложных срабатываний. Сомневаешься — не пиши.
-3. Проблемы вне рубрикатора — в outside_rubric, они не считаются ответом.
-4. Пустой findings — нормальный результат.
+RULES:
+1. Each remark references a rule number and specific lines of the diff (line numbers from the RIGHT side).
+2. Priority — minimum false positives. If in doubt — do not write.
+3. Problems outside the rubric go into outside_rubric; they do not count as answers.
+4. An empty findings list is a normal result.
 
-ВЫВОД:
+OUTPUT:
 {"findings":[{"rule_id":"R1","path":"...","line_start":0,"line_end":0,"comment":"...","confidence":0.0}],"outside_rubric":[{"path":"...","line_start":0,"note":"..."}]}
 
-Рубрикатор:
+Rubric:
 {{RUBRIC_MD}}
 
-Дифф:
+Diff:
 {{DIFF}}
 ```
 
-Baseline — тот же промпт, но вместо рубрикатора одна строка: «Найди дефекты, краевые случаи и проблемы дизайна». Без пары чисел «с рубрикатором / без» результат не интерпретируется.
+Baseline — the same prompt, but instead of the rubric a single line: "Find defects, edge cases, and design problems." Without the pair of numbers "with rubric / without", the result cannot be interpreted.
 
 <details>
-<summary>evaluate.py — ground truth и матчинг</summary>
+<summary>evaluate.py — ground truth and matching</summary>
 
-- **Дифф на вход**: для каждого PR из `eval/threads.jsonl` берутся файлы, в которых есть треды; дифф выгружается через `GET /repos/{o}/{r}/pulls/{n}/files` (поле `patch`). Файлы без тредов тоже подаются — иначе precision завышен.
-- **Ground truth**: треды holdout прогоняются через промпт 1 (он ничему не учится), остаются `category ∈ {defect, design, docs}`, `needs_context=false`.
-- **Матч**: совпадает `path`, диапазоны строк пересекаются с допуском $\pm 3$, и косинусная близость `normalized` ↔ `finding.comment` выше порога (эмбеддер любой multilingual, порог подобрать на 20–30 ручных парах; при малых данных можно и вовсе разметить матчи руками — их будет несколько десятков).
-- **Отчёт в абсолютных числах**: GT всего / найдено с рубрикатором / найдено baseline / ложных с рубрикатором / ложных baseline / findings с `confidence < 0.5`. Разбивка по `rule_id`: правило с нулём совпадений и ненулевыми ложными — кандидат на удаление.
-- **Критерий успеха**: рубрикатор находит больше GT, чем baseline, при не большем числе ложных. Если recall растёт только за счёт `confidence < 0.5` — это шум.
+- **Input diff**: for each PR from `eval/threads.jsonl`, take the files that have threads; the diff is fetched via `GET /repos/{o}/{r}/pulls/{n}/files` (the `patch` field). Files without threads are also submitted — otherwise precision is inflated.
+- **Ground truth**: holdout threads are run through prompt 1 (it doesn't learn anything); keep `category ∈ {defect, design, docs}`, `needs_context=false`.
+- **Match**: `path` matches, line ranges overlap with a tolerance of $\pm 3$, and the cosine similarity of `normalized` ↔ `finding.comment` is above a threshold (any multilingual embedder; tune the threshold on 20–30 manually labeled pairs; with small data you can even label the matches entirely by hand — there will be a few dozen of them).
+- **Report in absolute numbers**: total GT / found with rubric / found by baseline / false positives with rubric / false positives baseline / findings with `confidence < 0.5`. Breakdown by `rule_id`: a rule with zero matches and non-zero false positives is a candidate for removal.
+- **Success criterion**: the rubric finds more GT than the baseline with no more false positives. If recall grows only due to `confidence < 0.5`, that is noise.
 
 </details>
 
 ---
 
-## Порядок запуска и обвязка
+## Run order and tooling
 
-`run_llm.py` — единый раннер для шагов 1–7: читает промпт из `prompts/`, подставляет батч, вызывает модель с `temperature=0`, валидирует ответ по `schemas/`, при ошибке парсинга повторяет запрос с текстом ошибки (до 3 раз), пишет `run_id` и `schema_version` в каждую строку. Батчи не пересекаются; при падении батча остальные продолжаются, упавшие — в `errors.jsonl`.
+`run_llm.py` — a single runner for steps 1–7: reads the prompt from `prompts/`, substitutes the batch, calls the model with `temperature=0`, validates the response against `schemas/`, on a parse error retries the request with the error text (up to 3 times), writes `run_id` and `schema_version` into every line. Batches do not overlap; if a batch fails, the others continue, and failed ones go to `errors.jsonl`.
 
 ```
 extract.py → prepare.py → [p1 ×1] → filter claims → [p2 ×3, shuffle] → filter_rules.py
-→ [p3 ×1] → drop runs_covered<2 → КУРАЦИЯ → coverage (код + p4) → stats + [p5] + формула
-→ [p6] → КУРАЦИЯ → eval: p1 на holdout, p7 ×2 (рубрикатор / baseline), evaluate.py
+→ [p3 ×1] → drop runs_covered<2 → CURATION → coverage (code + p4) → stats + [p5] + formula
+→ [p6] → CURATION → eval: p1 on holdout, p7 ×2 (rubric / baseline), evaluate.py
 ```
 
-`taxonomy.yaml` подставляется в промпты 2 и 4 через `{{TAXONOMY_AXES}}`. `PIPELINE.md` из прошлого ответа актуализируйте тремя строками в журнале решений: тред как единица; `reviews.jsonl` не выгружается; пороги консервативности ($\geq 3$ тредов, $\geq 2$ PR, $\geq 2$ прогонов).
+`taxonomy.yaml` is substituted into prompts 2 and 4 via `{{TAXONOMY_AXES}}`. Update `PIPELINE.md` from the previous answer with three lines in the decision log: the thread as the unit; `reviews.jsonl` is not exported; conservativeness thresholds ($\geq 3$ threads, $\geq 2$ PRs, $\geq 2$ runs).
 
 <details>
-<summary>Чего ожидать на этом объёме и когда останавливаться</summary>
+<summary>What to expect at this volume and when to stop</summary>
 
-- Если после шага 3 осталось ≤ 2 правил — не ослабляйте пороги. Либо расширяйте окно дат / список репозиториев, либо честно зафиксируйте, что ревью в команде неоднородны и правила из них не выводятся. Это тоже результат.
-- Если `prepare.py` показал ≤ 2 уникальных ревьюеров — всё, что получится, описывает стиль этих людей. Рубрикатор пригоден, но в `PIPELINE.md` это надо записать как ограничение.
-- Holdout из 30–50 тредов даст 10–20 GT-замечаний. Разница в 2–3 найденных между рубрикатором и baseline — не доказательство. Доказательство — повторить шаг 7 через квартал на новых PR.
-- Промпт 1 — единственный шаг, где стоит выборочно проверить разметку руками (20 тредов). Ошибка там тиражируется дальше, а стоит проверка десять минут.
+- If ≤ 2 rules remain after step 3 — do not loosen the thresholds. Either widen the date window / list of repositories, or honestly record that reviews in the team are heterogeneous and rules cannot be derived from them. That is also a result.
+- If `prepare.py` showed ≤ 2 unique reviewers — whatever comes out describes the style of those people. The rubric is usable, but this must be recorded as a limitation in `PIPELINE.md`.
+- A holdout of 30–50 threads will yield 10–20 GT remarks. A difference of 2–3 findings between the rubric and the baseline is not proof. Proof is repeating step 7 a quarter later on new PRs.
+- Prompt 1 is the only step where it is worth spot-checking the labeling by hand (20 threads). An error there propagates downstream, and the check costs ten minutes.
 
 </details>
 
-Два предположения, которые я сделал молча и которые стоит проверить: репозиториев один или несколько в пределах одной команды (иначе `applies_to` и `local_taste` разъезжаются по репо, и нужна группировка по `repo`), и в команде больше двух активных ревьюеров (иначе см. предупреждение в `prepare.py`). Если оба неверны — скажите, поправлю шаги 0b и 3.
+Two assumptions I made silently that are worth verifying: there is one repository or several within a single team (otherwise `applies_to` and `local_taste` diverge across repos, and grouping by `repo` is needed), and the team has more than two active reviewers (otherwise see the warning in `prepare.py`). If both are wrong, let me know and I will adjust steps 0b and 3.
