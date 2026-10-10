@@ -1,0 +1,31 @@
+# Taxonomy of code review axes
+# Used in steps 2 (rule induction) and 4 (coverage analysis)
+
+# TODO: define the 12 review axes
+# Examples from common taxonomies:
+# - error_handling
+# - resource_management
+# - concurrency
+# - security
+# - api_design
+# - testability
+# - documentation
+# - performance
+# - data_validation
+# - edge_cases
+# - maintainability
+# - observability
+
+axes:
+  - TODO_axis_1
+  - TODO_axis_2
+  - TODO_axis_3
+  - TODO_axis_4
+  - TODO_axis_5
+  - TODO_axis_6
+  - TODO_axis_7
+  - TODO_axis_8
+  - TODO_axis_9
+  - TODO_axis_10
+  - TODO_axis_11
+  - TODO_axis_12

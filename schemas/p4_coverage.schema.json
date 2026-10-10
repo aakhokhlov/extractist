@@ -1,0 +1,41 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Step 4: Coverage analysis by taxonomy axes",
+  "type": "object",
+  "required": ["axes", "clusters"],
+  "properties": {
+    "axes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["axis", "blind_spot_note"],
+        "properties": {
+          "axis": {
+            "type": "string"
+          },
+          "blind_spot_note": {
+            "type": ["string", "null"]
+          }
+        }
+      }
+    },
+    "clusters": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["cluster_id", "axis_suggested", "repetitive_note"],
+        "properties": {
+          "cluster_id": {
+            "type": "string"
+          },
+          "axis_suggested": {
+            "type": ["string", "null"]
+          },
+          "repetitive_note": {
+            "type": ["string", "null"]
+          }
+        }
+      }
+    }
+  }
+}

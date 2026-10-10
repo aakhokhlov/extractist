@@ -1,0 +1,31 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Step 5: Score rules by impact",
+  "type": "object",
+  "required": ["scores"],
+  "properties": {
+    "scores": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["cluster_id", "s", "insufficient_data", "reasoning"],
+        "properties": {
+          "cluster_id": {
+            "type": "string"
+          },
+          "s": {
+            "type": ["number", "null"],
+            "minimum": 0,
+            "maximum": 1
+          },
+          "insufficient_data": {
+            "type": "boolean"
+          },
+          "reasoning": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

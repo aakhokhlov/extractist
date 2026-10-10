@@ -1,0 +1,6 @@
+# Extra bot logins, one per line (logins ending with [bot] are filtered automatically)
+# Example:
+# dependabot
+# renovate
+
+# TODO: add known bot logins from your repositories

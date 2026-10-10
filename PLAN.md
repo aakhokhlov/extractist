@@ -1,4 +1,4 @@
-That is enough information. Below is the full pipeline, taking into account three decisions: the thread is the unit, `reviews.jsonl` is not exported at all, and conservativeness matters more than completeness.
+Below is the full pipeline, built on three decisions: the thread is the unit, `reviews.jsonl` is not exported at all, and conservativeness matters more than completeness.
 
 ## What the "hundreds of comments" scale changes
 
@@ -14,26 +14,38 @@ Conservativeness thresholds hard-coded between steps: a rule requires $\geq 3$ d
 ## Project structure
 
 ```
-review-rules/
-├── PIPELINE.md
-├── taxonomy.yaml
-├── schemas/            # JSON Schema for each *.jsonl
-├── prompts/            # p1_normalize.txt … p7_review.txt
+review-rules/           # = repository root
+├── README.md           # human: run commands, PAT scopes, request estimate (step 0)
+├── PIPELINE.md         # human: decision log, run log, recorded limitations
+├── repos.txt           # human: owner/name per line (step 0 input)
+├── bots.txt            # human: extra bot logins, one per line (step 0b input)
+├── taxonomy.yaml       # human: the 12 review axes (steps 2, 4 input)
+├── schemas/            # JSON Schema for each LLM response: p1…p7 *.schema.json
+├── prompts/            # system.txt, p1_normalize.txt p2_induce.txt p3_merge.txt
+│                       # p4_coverage.txt p5_score.txt p6_rubric.txt p7_review.txt
 ├── scripts/
 │   ├── extract.py      # step 0
-│   ├── prepare.py      # step 0b: threads, features, holdout
-│   ├── run_llm.py      # batching, retry, JSON validation
-│   ├── filter_rules.py # mechanical thresholds after step 2
-│   └── evaluate.py     # matching in step 7
+│   ├── prepare.py      # step 0b: threads, features, holdout, LLM views
+│   ├── run_llm.py      # batching, retry, JSON validation (steps 1–7)
+│   ├── filter_rules.py # mechanical thresholds after step 2 and after step 3
+│   ├── aggregate.py    # code between LLM steps: claims (1), coverage (4)
+│   ├── prioritize.py   # stats, LLM scoring, priority formula (5)
+│   └── evaluate.py     # diffs, ground truth, matching in step 7
 └── data/
-    ├── raw/comments.jsonl
-    ├── work/threads.jsonl threads_llm.jsonl claims.jsonl rules_run{1,2,3}.jsonl
-    ├── work/rules_filtered.jsonl canonical.jsonl canonical_curated.jsonl
-    ├── work/priority.jsonl rubric.md
-    └── eval/threads.jsonl findings.jsonl report.json
+    ├── split.json
+    ├── raw/comments.jsonl state.json errors.jsonl
+    ├── work/threads.jsonl threads_llm.jsonl claims_raw.jsonl claims.jsonl
+    ├── work/rules_run{1,2,3}.jsonl singletons_run{1,2,3}.jsonl
+    ├── work/rules_filtered.jsonl rules_local.jsonl clusters_raw.jsonl canonical.jsonl
+    ├── work/canonical_curated.jsonl coverage_input.json coverage.json
+    ├── work/stats.jsonl scores.jsonl priority.jsonl rubric_draft.md rubric.md errors.jsonl
+    └── eval/threads.jsonl threads_llm.jsonl claims_raw.jsonl gt.jsonl diffs.jsonl
+        eval/findings.jsonl labels.jsonl report.json errors.jsonl
 ```
 
-Common system prefix for all LLM steps 1–7:
+Conventions: every `errors.jsonl` is written next to the output of the script that failed. In `run_llm.py` output, each element of the response's top-level array becomes one JSONL line. The line gets `run_id` and `schema_version`, plus `batch_id`. Note: `errors.jsonl` appears in multiple contract Output fields but is omitted from later ones for brevity; assume all LLM-calling steps can produce errors.
+
+Common system prefix for all LLM steps 1–7 (`prompts/system.txt`, prepended by `run_llm.py`):
 
 ```text
 You are a component of an automated pipeline. Respond only with valid JSON matching the specified schema, without markdown or explanations. Do not invent data that is not present in the input. When uncertain, use the values provided by the schema (null, needs_context, insufficient_data) rather than guesses. If the input contains a field not described in the task, ignore it.
@@ -42,6 +54,13 @@ You are a component of an automated pipeline. Respond only with valid JSON match
 ---
 
 ## Step 0 — export (prompt for the coding agent)
+
+| Contract | |
+|---|---|
+| Input | `repos.txt`, env `GITHUB_TOKEN`, GitHub GraphQL API |
+| Output | `data/raw/comments.jsonl`, `data/raw/state.json`, `data/raw/errors.jsonl`; `README.md` (written by the coding agent together with the script) |
+| Performer | `scripts/extract.py` |
+| Template vars | — |
 
 ```text
 Write extract.py in Python 3.11+ with httpx: export inline code review comments from GitHub via GraphQL.
@@ -59,8 +78,8 @@ Queries:
    commits(first:100){ nodes{ commit{ committedDate oid } } }
    Paginate all nested collections if hasNextPage.
 
-OUTPUT: a single file comments.jsonl, one line = one inline comment:
-{"id","repo","pr_id","pr_merged_at","pr_author","thread_id","path","line_range":{"start","end","side"},
+OUTPUT: a single file data/raw/comments.jsonl (default of --out; --state defaults to data/raw/state.json), one line = one inline comment. repo = "owner/name", pr_id = PR number (integer), id = GraphQL node id, database_id = databaseId (needed for the discussion_r link in curation):
+{"id","database_id","repo","pr_id","pr_merged_at","pr_author","thread_id","path","line_range":{"start","end","side"},
  "diff_hunk","comment_body","author","author_association","created_at","is_reply",
  "thread_resolved","thread_outdated","comment_commit_oid","original_commit_oid",
  "pr_size":{"additions","deletions","changed_files"},
@@ -87,13 +106,20 @@ STRUCTURE: build_pr_list_query() and build_pr_query() as separate functions retu
 
 ## Step 0b — preparation (prompt for the coding agent)
 
+| Contract | |
+|---|---|
+| Input | `data/raw/comments.jsonl`, `bots.txt` |
+| Output | `data/work/threads.jsonl`, `data/work/threads_llm.jsonl`, `data/eval/threads.jsonl`, `data/eval/threads_llm.jsonl`, `data/split.json`; summary on stdout |
+| Performer | `scripts/prepare.py` |
+| Template vars | — |
+
 ```text
 Write prepare.py: from data/raw/comments.jsonl build threads, features, and the holdout. No network access is used.
 
 1. build_threads(): group by thread_id, comments ordered by created_at.
-   Thread fields: thread_id, repo, pr_id, pr_merged_at, path, line_range, diff_hunk (from the first comment),
-   comments:[{id, author_role, is_pr_author, body, created_at}],
-   where author_role: "bot" if the login ends with "[bot]" or is listed in bots.txt; "member" if authorAssociation ∈ {MEMBER, OWNER, COLLABORATOR}; otherwise "external".
+   Thread fields: thread_id, repo, pr_id, pr_merged_at, path, line_range, diff_hunk (from the first comment), resolved (= thread_resolved), outdated (= thread_outdated),
+   comments:[{id, database_id, author, author_role, is_pr_author, body (= comment_body), created_at, comment_commit_oid, original_commit_oid}],
+   where author_role: "bot" if the login ends with "[bot]" or is listed in bots.txt (one login per line, # comments allowed); "member" if author_association ∈ {MEMBER, OWNER, COLLABORATOR}; otherwise "external".
    is_pr_author = author == pr_author.
    Remove threads where ALL comments are from bots OR the first comment is from a bot. Other bots in the middle of a thread remain with author_role="bot".
    Remove threads whose first comment is shorter than 4 characters after trim.
@@ -104,9 +130,9 @@ Write prepare.py: from data/raw/comments.jsonl build threads, features, and the 
    resolved_after_fix = resolved AND code_changed_after, resolved_without_fix = resolved AND code_changed_after == false,
    thread_turnaround_hours, days_before_merge, blocked_merge (from the PR), pr_changes_requested_count, pr_size.
 
-3. holdout_split(): sort PRs by pr_merged_at, the last 15% of PRs (not threads!) → data/eval/threads.jsonl, the rest → data/work/threads.jsonl. Write the date boundary to split.json.
+3. holdout_split(): sort PRs by pr_merged_at, the last 15% of PRs (not threads!) → data/eval/threads.jsonl, the rest → data/work/threads.jsonl. Write the date boundary to data/split.json.
 
-4. make_llm_view(): data/work/threads_llm.jsonl — a copy of work/threads.jsonl from which the following are REMOVED: resolved, outdated, code_changed_after, resolved_after_fix, resolved_without_fix, blocked_merge, pr_changes_requested_count, n_comments, thread_turnaround_hours, days_before_merge, first_reviewer_hash, pr_size, pr_merged_at. What remains: thread_id, repo, pr_id, path, line_range, diff_hunk, comments (without created_at). Replace author logins with "reviewer_1", "pr_author", "reviewer_2" in order of appearance.
+4. make_llm_view(): data/work/threads_llm.jsonl — a copy of work/threads.jsonl from which the following are REMOVED: resolved, outdated, code_changed_after, resolved_after_fix, resolved_without_fix, blocked_merge, pr_changes_requested_count, n_comments, thread_turnaround_hours, days_before_merge, first_reviewer_hash, pr_size, pr_merged_at. What remains: thread_id, repo, pr_id, path, line_range, diff_hunk, comments:[{author, body}], where author is a pseudonym: "bot" for author_role="bot"; otherwise replace author logins with "reviewer_1", "pr_author", "reviewer_2" in order of appearance. Do the same for eval: data/eval/threads_llm.jsonl from eval/threads.jsonl.
 
 5. Print a summary: threads total / after filtering / in work / in eval; null share for each computed field; distribution of n_comments; number of unique first_reviewer_hash values. If there are ≤2 unique reviewers, print the warning "reviewer diversity is low; the rules will reflect the style of 1–2 people".
 ```
@@ -114,6 +140,13 @@ Write prepare.py: from data/raw/comments.jsonl build threads, features, and the 
 ---
 
 ## Step 1 — normalizing threads → claims
+
+| Contract | |
+|---|---|
+| Input | `data/work/threads_llm.jsonl` |
+| Output | `data/work/claims_raw.jsonl` (LLM output), `data/work/claims.jsonl` (filtered) |
+| Performer | `scripts/aggregate.py` (calls `run_llm.py` with `prompts/p1_normalize.txt`) |
+| Template vars | `{{BATCH_JSON}}` ← threads_llm.jsonl batches of 20–30 threads |
 
 Batch of 20–30 threads. Input — `threads_llm.jsonl`.
 
@@ -152,9 +185,16 @@ Batch:
 {{BATCH_JSON}}
 ```
 
-Code after step 1: only `category ∈ {defect, design, docs}`, `needs_context=false`, `withdrawn=false` go into `claims.jsonl`. For each claim, the code appends `pr_id` and `first_reviewer_hash` from `threads.jsonl` — the model in step 2 does **not** see them.
+After the LLM responds, `aggregate.py` filters the output: only claims where `category ∈ {defect, design, docs}`, `needs_context=false`, `withdrawn=false` go into `data/work/claims.jsonl`. For each surviving claim, the code appends `pr_id` and `first_reviewer_hash` from `data/work/threads.jsonl`. The model in step 2 does **not** see these fields.
 
 ## Step 2 — rule induction (3 runs)
+
+| Contract | |
+|---|---|
+| Input | `data/work/claims.jsonl`, `taxonomy.yaml` |
+| Output | `data/work/rules_run{1,2,3}.jsonl`, `data/work/singletons_run{1,2,3}.jsonl` |
+| Performer | `run_llm.py` with `prompts/p2_induce.txt` (called 3× with different shuffle seeds) |
+| Template vars | `{{BATCH_JSON}}` ← claims.jsonl batches of 40–60 claims; `{{TAXONOMY_AXES}}` ← taxonomy.yaml |
 
 Batch of 40–60 claims. Three runs with different `shuffle_seed`; each run writes its own `rules_run{k}.jsonl` with a `run_id`. With hundreds of threads, one run is 2–5 batches.
 
@@ -191,8 +231,17 @@ Claims:
 {{BATCH_JSON}}
 ```
 
+The LLM outputs `{"rules":[...], "singletons":[...]}`. `run_llm.py` writes each element of the `rules` array to `data/work/rules_run{k}.jsonl` (one rule per line), and each element of the `singletons` array to `data/work/singletons_run{k}.jsonl`.
+
 <details>
 <summary>Mechanical filter between steps 2 and 3 (filter_rules.py)</summary>
+
+| Contract | |
+|---|---|
+| Input | `data/work/rules_run{1,2,3}.jsonl`, `data/work/threads.jsonl`, `data/work/claims.jsonl` |
+| Output | `data/work/rules_filtered.jsonl`, `data/work/rules_local.jsonl` |
+| Performer | `scripts/filter_rules.py` |
+| Template vars | — |
 
 The code computes from `evidence_thread_ids` via `threads.jsonl`: `n_threads`, `n_prs`, `n_reviewers`, `n_repos`. It keeps a rule if:
 
@@ -207,6 +256,13 @@ Output: a combined `rules_filtered.jsonl` from all three runs, with each rule's 
 </details>
 
 ## Step 3 — merging runs and deduplication
+
+| Contract | |
+|---|---|
+| Input | `data/work/rules_filtered.jsonl`, `data/work/threads.jsonl` |
+| Output | `data/work/clusters_raw.jsonl` (LLM output), `data/work/canonical.jsonl` (after filter) |
+| Performer | `scripts/filter_rules.py` (calls `run_llm.py` with `prompts/p3_merge.txt`, then filters) |
+| Template vars | `{{RULES_JSON}}` ← rules_filtered.jsonl (all rules in one batch) |
 
 One call for everything (with hundreds of threads this is 20–60 rules). Input — `id, run_id, statement, axis, scope, applies_to, evidence_thread_ids, counterexample`.
 
@@ -232,7 +288,7 @@ Rules:
 {{RULES_JSON}}
 ```
 
-After step 3, the code appends to each cluster: `runs_covered` (how many of the 3 runs produced a member), the combined `evidence_thread_ids`, `n_threads`, `n_prs`, `n_reviewers`. **Clusters with `runs_covered` $< 2$ are discarded.** What remains is `canonical.jsonl`.
+After step 3, `filter_rules.py` appends to each cluster: `runs_covered` (how many of the 3 runs produced a member), the combined `evidence_thread_ids` from all members, `n_threads`, `n_prs`, `n_reviewers` (computed from the combined thread list via `threads.jsonl`). **Clusters with `runs_covered` $< 2$ are discarded.** What remains is written to `data/work/canonical.jsonl`.
 
 <details>
 <summary>Manual curation after step 3 (mandatory)</summary>
@@ -251,7 +307,14 @@ The result is `canonical_curated.jsonl` with a `curation_note` field. A rule you
 
 ## Step 4 — coverage by axis
 
-Using `canonical_curated.jsonl`, the code counts the number of clusters and threads for each axis from `taxonomy.yaml`, as well as `repetitive = n_prs / n_threads < 0.4 OR n_reviewers == 1`. Interpretation is left to the model.
+| Contract | |
+|---|---|
+| Input | `data/work/canonical_curated.jsonl`, `taxonomy.yaml` |
+| Output | `data/work/coverage_input.json` (computed stats), `data/work/coverage.json` (LLM output) |
+| Performer | `scripts/aggregate.py` (computes stats, then calls `run_llm.py` with `prompts/p4_coverage.txt`) |
+| Template vars | `{{COVERAGE_JSON}}` ← coverage_input.json; `{{TAXONOMY_AXES}}` ← taxonomy.yaml |
+
+Using `canonical_curated.jsonl`, the code counts the number of clusters and threads for each axis from `taxonomy.yaml`, as well as `repetitive = n_prs / n_threads < 0.4 OR n_reviewers == 1`. The result is written to `coverage_input.json` and passed to the LLM for interpretation.
 
 ```text
 You are given canonical code review rules with precomputed statistics and a list of taxonomy axes with the number of rules for each.
@@ -270,11 +333,18 @@ Data:
 {{COVERAGE_JSON}}
 ```
 
-The output of this step is for humans (`coverage.json`); it does not go into the rubric. Its value with small data is to honestly show that the rules cover 3–4 axes out of 12, and that this is a limitation, not a property of the team's code.
+The output of this step is for humans (`data/work/coverage.json`); it does not go into the rubric. Its value with small data is to honestly show that the rules cover 3–4 axes out of 12, and that this is a limitation, not a property of the team's code.
 
 ## Step 5 — prioritization
 
-The code aggregates from `evidence_thread_ids` in `threads.jsonl`: `resolved_after_fix_rate`, `resolved_without_fix_rate`, `code_changed_rate`, `author_reply_rate`, `mean_n_participants`, `blocked_merge_rate`, `null_rate`. The model provides $s$:
+| Contract | |
+|---|---|
+| Input | `data/work/canonical_curated.jsonl`, `data/work/threads.jsonl` |
+| Output | `data/work/stats.jsonl` (computed stats), `data/work/scores.jsonl` (LLM output), `data/work/priority.jsonl` (final) |
+| Performer | `scripts/prioritize.py` (aggregates stats, calls `run_llm.py` with `prompts/p5_score.txt`, then computes priority formula) |
+| Template vars | `{{CLUSTERS_WITH_STATS_JSON}}` ← stats.jsonl |
+
+The code aggregates from `evidence_thread_ids` in `threads.jsonl`: `resolved_after_fix_rate`, `resolved_without_fix_rate`, `code_changed_rate`, `author_reply_rate`, `mean_n_participants`, `blocked_merge_rate`, `null_rate`. The result is written to `stats.jsonl`. The model provides $s$:
 
 ```text
 You are given code review rules with outcome statistics for their evidence. stats fields (shares in 0..1, null — no data): n_threads, n_prs, n_reviewers, resolved_after_fix_rate, resolved_without_fix_rate, code_changed_rate, author_reply_rate, mean_n_participants, blocked_merge_rate, null_rate.
@@ -302,13 +372,22 @@ Data:
 {{CLUSTERS_WITH_STATS_JSON}}
 ```
 
-The code computes the priority. Logarithms over threads are needed so that one cluster with 40 identical remarks does not overwhelm the rest; the number of PRs enters linearly as a measure of diversity:
+The code writes the LLM response to `data/work/scores.jsonl`, then computes the priority. Logarithms over threads are needed so that one cluster with 40 identical remarks does not overwhelm the rest; the number of PRs enters linearly as a measure of diversity:
 
 $$priority = \log(1 + n_{threads}) \cdot n_{prs} \cdot a \cdot s, \qquad a = \begin{cases} resolved\_after\_fix\_rate & \text{if not null} \\ 0.5 & \text{otherwise} \end{cases}$$
 
-`insufficient_data=true` → `priority = null`; the rule is ranked last but not deleted.
+`insufficient_data=true` → `priority = null`; the rule is ranked last but not deleted. The final output is written to `data/work/priority.jsonl`.
 
 ## Step 6 — rubric
+
+| Contract | |
+|---|---|
+| Input | `data/work/priority.jsonl`, `data/work/canonical_curated.jsonl`, `data/work/claims.jsonl`, `data/work/threads.jsonl` (to retrieve best_evidence) |
+| Output | `data/work/rubric_draft.md` (LLM output), `data/work/rubric.md` (after manual curation) |
+| Performer | `run_llm.py` with `prompts/p6_rubric.txt`, then human |
+| Template vars | `{{PRIORITY_JSON}}` ← priority.jsonl sorted descending + enriched with best_evidence detail |
+
+Before calling the LLM, the code (in `run_llm.py` or a helper) enriches each cluster: from `canonical_curated.jsonl` it takes `automate_with` and `best_evidence_claim_id`; using that claim_id it retrieves the full `evidence` (quote) and via `thread_id` the `diff_hunk` from `threads.jsonl`. The result is a JSON with `cluster_id, statement, axis, scope, applies_to, priority, counterexample, best_evidence:{quote, diff_hunk}, automate_with`. Rules from `rules_local.jsonl` (split off after step 2) are appended to this input with `priority=null` and `scope=local_taste`; they skip steps 3–5 but appear in the "Conventions of this repository" section of the rubric.
 
 ```text
 Build a rubric for an LLM reviewer from the canonical rules with priorities. Input: cluster_id, statement, axis, scope, applies_to, priority, counterexample, best_evidence (quote + diff_hunk), automate_with.
@@ -338,9 +417,16 @@ Data:
 {{PRIORITY_JSON}}
 ```
 
-After step 6 — a second, short manual curation: read the rubric as instructions for a new employee. Any item that is unclear without the pipeline's context is rewritten or deleted.
+The LLM output goes to `data/work/rubric_draft.md`. After step 6 — a second, short manual curation: read the rubric as instructions for a new employee. Any item that is unclear without the pipeline's context is rewritten or deleted. Save the result as `data/work/rubric.md`.
 
 ## Step 7 — validation on the holdout
+
+| Contract | |
+|---|---|
+| Input | `data/eval/threads.jsonl`, `data/eval/threads_llm.jsonl`, `data/work/rubric.md`, GitHub API (diffs) |
+| Output | `data/eval/claims_raw.jsonl` (GT from p1), `data/eval/gt.jsonl` (filtered GT), `data/eval/diffs.jsonl` (fetched diffs), `data/eval/findings.jsonl` (p7 output ×2 runs), `data/eval/labels.jsonl` (manual labels if needed), `data/eval/report.json` |
+| Performer | `scripts/evaluate.py` (fetches diffs, calls `run_llm.py` with `prompts/p1_normalize.txt` and `prompts/p7_review.txt`, then matches) |
+| Template vars | `{{RUBRIC_MD}}` ← rubric.md or a baseline string; `{{DIFF}}` ← fetched patch |
 
 Reviewer prompt:
 
@@ -370,10 +456,13 @@ Baseline — the same prompt, but instead of the rubric a single line: "Find def
 <details>
 <summary>evaluate.py — ground truth and matching</summary>
 
-- **Input diff**: for each PR from `eval/threads.jsonl`, take the files that have threads; the diff is fetched via `GET /repos/{o}/{r}/pulls/{n}/files` (the `patch` field). Files without threads are also submitted — otherwise precision is inflated.
-- **Ground truth**: holdout threads are run through prompt 1 (it doesn't learn anything); keep `category ∈ {defect, design, docs}`, `needs_context=false`.
-- **Match**: `path` matches, line ranges overlap with a tolerance of $\pm 3$, and the cosine similarity of `normalized` ↔ `finding.comment` is above a threshold (any multilingual embedder; tune the threshold on 20–30 manually labeled pairs; with small data you can even label the matches entirely by hand — there will be a few dozen of them).
-- **Report in absolute numbers**: total GT / found with rubric / found by baseline / false positives with rubric / false positives baseline / findings with `confidence < 0.5`. Breakdown by `rule_id`: a rule with zero matches and non-zero false positives is a candidate for removal.
+| Performer | `scripts/evaluate.py` |
+|---|---|
+
+- **Input diff**: for each PR from `eval/threads.jsonl`, take the files that have threads; the diff is fetched via `GET /repos/{o}/{r}/pulls/{n}/files` (the `patch` field), written to `diffs.jsonl`. Files without threads are also submitted — otherwise precision is inflated.
+- **Ground truth**: holdout threads in `eval/threads_llm.jsonl` are run through prompt 1 (it doesn't learn anything); raw output → `claims_raw.jsonl`; keep `category ∈ {defect, design, docs}`, `needs_context=false` → `gt.jsonl`.
+- **Match**: `path` matches, line ranges overlap with a tolerance of $\pm 3$, and the cosine similarity of `normalized` ↔ `finding.comment` is above a threshold (any multilingual embedder; tune the threshold on 20–30 manually labeled pairs saved in `labels.jsonl`; with small data you can even label the matches entirely by hand — there will be a few dozen of them).
+- **Report in absolute numbers** (written to `report.json`): total GT / found with rubric / found by baseline / false positives with rubric / false positives baseline / findings with `confidence < 0.5`. Breakdown by `rule_id`: a rule with zero matches and non-zero false positives is a candidate for removal.
 - **Success criterion**: the rubric finds more GT than the baseline with no more false positives. If recall grows only due to `confidence < 0.5`, that is noise.
 
 </details>
@@ -382,15 +471,18 @@ Baseline — the same prompt, but instead of the rubric a single line: "Find def
 
 ## Run order and tooling
 
-`run_llm.py` — a single runner for steps 1–7: reads the prompt from `prompts/`, substitutes the batch, calls the model with `temperature=0`, validates the response against `schemas/`, on a parse error retries the request with the error text (up to 3 times), writes `run_id` and `schema_version` into every line. Batches do not overlap; if a batch fails, the others continue, and failed ones go to `errors.jsonl`.
+`run_llm.py` — a single runner for steps 1–7: reads the prompt from `prompts/`, prepends `prompts/system.txt`, substitutes template variables ({{VAR_NAME}}), calls the model with `temperature=0`, validates the response against `schemas/*.schema.json`, on a parse error retries the request with the error text (up to 3 times), writes `run_id`, `batch_id`, and `schema_version` into every JSONL line. Batches do not overlap; if a batch fails, the others continue, and failed batch records go to `errors.jsonl`.
+
+Run order:
 
 ```
-extract.py → prepare.py → [p1 ×1] → filter claims → [p2 ×3, shuffle] → filter_rules.py
-→ [p3 ×1] → drop runs_covered<2 → CURATION → coverage (code + p4) → stats + [p5] + formula
-→ [p6] → CURATION → eval: p1 on holdout, p7 ×2 (rubric / baseline), evaluate.py
+extract.py → prepare.py → aggregate.py calls [p1] → filter claims → [p2 ×3, shuffle] → filter_rules.py
+→ filter_rules.py calls [p3] → drop runs_covered<2 → CURATION → aggregate.py: count + [p4]
+→ prioritize.py: stats + [p5] + formula → [p6] → CURATION
+→ evaluate.py: [p1 on holdout], [p7 ×2 (rubric / baseline)], match + report
 ```
 
-`taxonomy.yaml` is substituted into prompts 2 and 4 via `{{TAXONOMY_AXES}}`. Update `PIPELINE.md` from the previous answer with three lines in the decision log: the thread as the unit; `reviews.jsonl` is not exported; conservativeness thresholds ($\geq 3$ threads, $\geq 2$ PRs, $\geq 2$ runs).
+`taxonomy.yaml` is substituted into prompts 2 and 4 via `{{TAXONOMY_AXES}}`. The user maintains `PIPELINE.md` manually as a decision log and run log, recording: the thread as the unit; `reviews.jsonl` is not exported; conservativeness thresholds ($\geq 3$ threads, $\geq 2$ PRs, $\geq 2$ runs); date ranges; observed limitations (reviewer diversity, axes coverage).
 
 <details>
 <summary>What to expect at this volume and when to stop</summary>

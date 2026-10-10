@@ -1,0 +1,63 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Step 3: Merge rules into canonical clusters",
+  "type": "object",
+  "required": ["clusters"],
+  "properties": {
+    "clusters": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "cluster_id",
+          "statement",
+          "axis",
+          "scope",
+          "applies_to",
+          "member_rule_ids",
+          "counterexample",
+          "conflict",
+          "conflict_note",
+          "merge_doubt"
+        ],
+        "properties": {
+          "cluster_id": {
+            "type": "string"
+          },
+          "statement": {
+            "type": "string"
+          },
+          "axis": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "enum": ["universal", "local_taste"]
+          },
+          "applies_to": {
+            "type": ["string", "null"]
+          },
+          "member_rule_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          },
+          "counterexample": {
+            "type": "string"
+          },
+          "conflict": {
+            "type": "boolean"
+          },
+          "conflict_note": {
+            "type": ["string", "null"]
+          },
+          "merge_doubt": {
+            "type": ["string", "null"]
+          }
+        }
+      }
+    }
+  }
+}

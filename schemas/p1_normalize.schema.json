@@ -1,0 +1,80 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Step 1: Normalize threads to claims",
+  "type": "object",
+  "required": ["threads"],
+  "properties": {
+    "threads": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["thread_id", "claims", "reason"],
+        "properties": {
+          "thread_id": {
+            "type": "string"
+          },
+          "claims": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "claim_id",
+                "category",
+                "normalized",
+                "evidence",
+                "code_anchor",
+                "severity_hint",
+                "language",
+                "needs_context",
+                "withdrawn"
+              ],
+              "properties": {
+                "claim_id": {
+                  "type": "string"
+                },
+                "category": {
+                  "type": "string",
+                  "enum": [
+                    "noise",
+                    "style_only",
+                    "question",
+                    "defect",
+                    "design",
+                    "docs",
+                    "process"
+                  ]
+                },
+                "normalized": {
+                  "type": ["string", "null"]
+                },
+                "evidence": {
+                  "type": ["string", "null"],
+                  "maxLength": 200
+                },
+                "code_anchor": {
+                  "type": ["string", "null"]
+                },
+                "severity_hint": {
+                  "type": ["string", "null"],
+                  "enum": ["low", "medium", "high", null]
+                },
+                "language": {
+                  "type": ["string", "null"]
+                },
+                "needs_context": {
+                  "type": "boolean"
+                },
+                "withdrawn": {
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "reason": {
+            "type": ["string", "null"]
+          }
+        }
+      }
+    }
+  }
+}
