@@ -1,0 +1,45 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Step 1b: Infer taxonomy axes from claims",
+  "type": "object",
+  "required": ["axes", "unassigned_claim_ids"],
+  "properties": {
+    "axes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "description", "evidenced", "n_claims", "example_claim_ids"],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "evidenced": {
+            "type": "boolean"
+          },
+          "n_claims": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "example_claim_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "unassigned_claim_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

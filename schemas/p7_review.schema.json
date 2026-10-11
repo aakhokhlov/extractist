@@ -11,7 +11,7 @@
         "required": ["rule_id", "path", "line_start", "line_end", "comment", "confidence"],
         "properties": {
           "rule_id": {
-            "type": "string"
+            "type": ["string", "null"]
           },
           "path": {
             "type": "string"

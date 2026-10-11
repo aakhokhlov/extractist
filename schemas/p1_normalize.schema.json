@@ -48,8 +48,7 @@
                   "type": ["string", "null"]
                 },
                 "evidence": {
-                  "type": ["string", "null"],
-                  "maxLength": 200
+                  "type": ["string", "null"]
                 },
                 "code_anchor": {
                   "type": ["string", "null"]

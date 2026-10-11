@@ -1,6 +1,0 @@
-# Repository list: one owner/name per line
-# Example:
-# myorg/backend
-# myorg/frontend
-
-# TODO: add your repositories

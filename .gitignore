@@ -1,0 +1,5 @@
+# Pipeline data: review comments and code fragments, never committed.
+# Directory skeleton is kept through .gitkeep files.
+data/**
+!data/**/
+!data/**/.gitkeep

@@ -1,0 +1,47 @@
+# Pipeline configuration: the only human-supplied input (see PLAN.md, "Configuration").
+# Secrets are NOT stored here: GITHUB_TOKEN and the LLM key come from environment variables.
+
+github:
+  repos: []            # TODO: ["owner/name", ...]
+  since: null          # TODO: ISO date, filter by mergedAt
+  until: null          # TODO: ISO date
+  concurrency: 4
+  bots: []             # TODO: extra bot logins; logins ending in [bot] are always bots
+
+holdout:
+  pr_fraction: 0.15    # last share of PRs by pr_merged_at
+  min_threads: 30      # widen the holdout until it has this many threads...
+  min_work_fraction: 0.7  # ...but keep at least this share of threads in work
+
+llm:
+  base_url: null       # TODO
+  model: null          # TODO
+  api_key_env: LLM_API_KEY
+  temperature: 0
+  max_retries: 3
+  output_language: Russian
+
+batches:
+  p1_threads: 25
+  p2_claims: 50
+  p7_files: 1
+
+runs:
+  induce_seeds: [1, 2, 3]
+
+thresholds:            # pipeline decisions; record in PIPELINE.md, do not loosen after a bad run
+  min_threads: 3
+  min_prs: 2
+  min_runs: 2
+  min_confidence: 0.6
+  repetitive_ratio: 0.4
+  insufficient_null_rate: 0.5
+
+rubric:
+  max_rules: 15
+
+eval:
+  embedder: BAAI/bge-m3
+  line_tolerance: 3
+  similarity_threshold: 0.75   # tune on data/eval/labels.jsonl
+  low_confidence: 0.5
